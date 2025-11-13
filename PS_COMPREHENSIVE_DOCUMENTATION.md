@@ -1314,3 +1314,773 @@ ElbowPlot(sobj)
 
 ---
 
+## Workflow 4: Pancreatic Differentiation Dataset
+
+**File**: `datasets/Pancreatic_differentiation_scRNA-seq/pancreatic_scrnaseq.Rmd`
+**Lines of Code**: 537
+**Level**: Expert
+**Time to Run**: 2-4 hours
+**Data Type**: Lineage tracing + CRISPR knockout in pancreatic differentiation
+**Scientific Context**: Cell-type-specific perturbation responses during organ development
+**Authors**: Bicna Song, Wei Li (Children's National Hospital)
+
+### Purpose
+
+This workflow demonstrates the **most advanced PS analysis** - calculating cell-type-specific and context-dependent perturbation responses. It showcases:
+
+1. Working with developmental/differentiation datasets
+2. Cell-type-specific PS score calculation
+3. Multiple response patterns for single perturbation
+4. Custom target gene selection per cell type
+5. Comparing PS scores across differentiation stages
+6. Advanced parameter tuning (background correction, lambda, target gene filtering)
+
+### When to Use This Workflow
+
+✅ **Use if:**
+- Analyzing perturbations in developmental contexts
+- Studying cell-type-specific perturbation responses
+- Have heterogeneous cell populations (multiple cell types/states)
+- Need to discover context-dependent effects
+- Want to see advanced scMAGeCK parameter usage
+
+❌ **Don't use if:**
+- Your dataset is homogeneous (one cell type)
+- You're new to PS analysis (start with Demo 1)
+- You don't need cell-type-specific analysis
+
+### Scientific Context
+
+**Research Question**: How do HHEX, FOXA1, and CCDC6 knockouts affect pancreatic differentiation?
+
+**Key Challenge**: Same perturbation causes different responses in different cell types:
+- **HHEX knockout** in DE (definitive endoderm) cells → Pattern 1
+- **HHEX knockout** in PP (pancreatic progenitor) cells → Pattern 2
+- **CCDC6 knockout** in LV/DUO cells → Pattern 1
+- **CCDC6 knockout** in DE cells → Pattern 2
+
+**Solution**: Calculate PS scores using cell-type-specific target genes
+
+### Cell Type Legend
+
+Abbreviations used throughout:
+- **DE**: Definitive Endoderm (clusters 0,1,5,13)
+- **PP**: Pancreatic Progenitors (cluster 6)
+- **PP-transition**: PP in transition (clusters 3,6,8,12)
+- **LV/DUO**: Liver/Duodenum (clusters 4,7,10)
+- **DE-transition**: DE in transition (cluster 2)
+- **WT**: Wild-type control (clone 47-WT)
+
+### Algorithm - Step by Step
+
+#### Part 1: Initial Setup and Global PS Calculation (lines 1-108)
+
+##### Step 1: Load Libraries and Data (lines 18-27)
+
+```r
+library(Seurat)
+library(scMAGeCK)
+library(hdf5r)
+library(ggplot2)
+
+rds <- readRDS("10clones_seurat.rds")
+```
+
+**Input**: Pre-processed Seurat object with:
+- Multiple clones (different CRISPR knockouts)
+- Already clustered and annotated
+- Multiple differentiation states
+
+##### Step 2: Visualize Starting Data (lines 29-31)
+
+```r
+DimPlot(rds, reduction = "umap")
+```
+
+##### Step 3: Prepare Barcode File from Metadata (lines 33-48)
+
+**Lines 34-39**: Extract guide info from Seurat metadata
+```r
+bc_frame <- rds@meta.data[,c("sgrna","gene","nCount_sgRNA")]
+bc_frame[,"cell"] <- rownames(bc_frame)
+bc_frame[,"barcode"] <- bc_frame[,"sgrna"]
+colnames(bc_frame) <- c("sgrna","gene","read_count","cell","barcode")
+bc_frame <- bc_frame[,c("cell","barcode","sgrna","gene","read_count")]
+bc_frame[,"umi_count"] <- bc_frame[,"read_count"]
+```
+
+**Key difference from other workflows**: Guide info already in metadata, not separate file
+
+**Line 44**: Clean up missing values
+```r
+bc_frame <- bc_frame[!is.na(bc_frame$gene),]
+```
+
+**Line 46**: Fix gene name format
+```r
+bc_frame$gene <- sub("_","-",bc_frame$gene)  # Convert underscores to hyphens
+```
+
+##### Step 4: Preprocess RDS (lines 54-60)
+
+**Line 55**: Add guide metadata
+```r
+rds <- pre_processRDS(bc_frame, rds)
+```
+
+**Line 59**: Check clone distribution
+```r
+table(rds$gene)
+```
+
+##### Step 5: Define Target Genes and Control (lines 62-68)
+
+**Lines 63-65**: List of perturbed clones
+```r
+targetgenelist <- c("43-HHEX", "44-HHEX", "45-HHEX", "51-FOXA1", 
+                    "53-FOXA1/2", "57-OTUD5", "58-OTUD5", 
+                    "61-CCDC6", "62-CCDC6")
+targetgenelist_geneid <- c("HHEX","HHEX","HHEX","FOXA1","FOXA2",
+                           "OTUD5","OTUD5","CCDC6","CCDC6")
+```
+
+**Line 67**: Negative control
+```r
+negative_ctrl_gene <- "47-WT"  # Wild-type control clone
+```
+
+##### Step 6: Initial PS Calculation (lines 71-79)
+
+**Lines 71-73**: Calculate PS with automatic target gene discovery
+```r
+eff_obj <- scmageck_eff_estimate(
+  rds, bc_frame, targetgenelist, negative_ctrl_gene,
+  scale_factor = 6,           # High amplification for developmental effects
+  assay_for_cor = "RNA",      # Use RNA assay for correlation
+  perturb_gene_exp_id_list = targetgenelist_geneid  # Gene expression IDs
+)
+```
+
+**Parameters explained:**
+- `scale_factor = 6`: Higher than previous workflows (developmental effects subtle)
+- `assay_for_cor = "RNA"`: Specifies which assay to use
+- `perturb_gene_exp_id_list`: Maps clone IDs to gene expression IDs
+
+##### Step 7: Visualize Initial Results (lines 82-92)
+
+**Lines 82-91**: Plot PS scores and gene expression for all clones
+```r
+for(pb_i in 1:length(targetgenelist)){
+  pb <- targetgenelist[pb_i]
+  p <- FeaturePlot(rds_subset, features = paste(pb, "eff", sep = "_"))
+  print(p)
+  pb_gene <- targetgenelist_geneid[pb_i]
+  p <- FeaturePlot(rds_subset, features = pb_gene)
+  print(p)
+}
+```
+
+#### Part 2: CCDC6 Analysis - Multiple Response Patterns (lines 110-269)
+
+**Key Discovery**: CCDC6 knockout shows different effects in different cell types
+
+##### Step 8: Identify Cell-Type-Specific Differentially Expressed Genes (lines 113-150)
+
+**Lines 114-115**: DE analysis in LV/DUO cells
+```r
+mk1_47 <- FindMarkers(rds_c47, group.by = "gene", ident.1 = "61-CCDC6", 
+                      ident.2 = "47-WT", logfc.threshold = 0.1)
+```
+
+**Lines 117-118**: DE analysis in DE cells
+```r
+mk1_01513 <- FindMarkers(rds_c01513, group.by = "gene", ident.1 = "61-CCDC6",
+                         ident.2 = "47-WT", logfc.threshold = 0.1)
+```
+
+**Lines 120-121**: DE analysis in PP cells
+```r
+mk1_6_PP <- FindMarkers(rds_c6_PP, group.by = "gene", ident.1 = "61-CCDC6",
+                        ident.2 = "47-WT", logfc.threshold = 0.1)
+```
+
+**Lines 123-124**: DE analysis in PP-transition cells
+```r
+mk1_63812_PP <- FindMarkers(rds_c63812_PP, group.by = "gene", ident.1 = "61-CCDC6",
+                            ident.2 = "47-WT", logfc.threshold = 0.1)
+```
+
+**Why separate DE analyses?**
+- Different cell types have different baseline expression
+- CCDC6 affects different genes in different contexts
+- Need cell-type-specific target genes for PS calculation
+
+##### Step 9: Re-calculate CCDC6 PS with Global Target Genes (lines 154-189)
+
+**Lines 162-170**: Calculate PS using all differentially expressed genes
+```r
+eff_obj2 <- scmageck_eff_estimate(
+  rds_subset2, bc_frame, targetgenelist, negative_ctrl_gene,
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  background_correction = T  # NEW: Enable background correction
+)
+```
+
+**New parameter:**
+- `background_correction = T`: Removes correlations present in control cells
+
+##### Step 10: Cell-Type-Specific PS - PP/PP-transition (lines 192-209)
+
+**Lines 194-196**: Select target genes specific to PP/PP-transition
+```r
+target_gene_63812 <- rownames(mk1_63812_PP)[
+  abs(mk1_63812_PP$avg_log2FC) > 0.25 & mk1_63812_PP$p_val_adj < 0.05]
+```
+
+**Filtering criteria:**
+- `|log2FC| > 0.25`: Significant fold change
+- `p_val_adj < 0.05`: Statistically significant
+
+**Lines 196-201**: Calculate PS using PP-specific target genes
+```r
+eff_obj5 <- scmageck_eff_estimate(
+  rds_subset2, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = target_gene_63812,  # Cell-type-specific targets!
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  background_correction = T
+)
+```
+
+**NEW parameter:**
+- `perturb_target_gene`: Manually specify which genes to use for PS calculation
+
+**Lines 207-208**: **Figure 5f** - PP/PP-transition pattern
+```r
+FeaturePlot(eff_obj5$rds, features = grep("eff", colnames(eff_obj5$rds@meta.data), value = T)) + 
+  ggtitle("Pattern 1: PP/PP in transition")
+```
+
+##### Step 11: Cell-Type-Specific PS - DE cells (lines 212-229)
+
+**Lines 214-221**: Calculate PS using DE-specific target genes
+```r
+target_gene_01513 <- rownames(mk1_01513)[
+  abs(mk1_01513$avg_log2FC) > 0.25 & mk1_01513$p_val_adj < 0.05]
+
+eff_obj3 <- scmageck_eff_estimate(
+  rds_subset2, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = target_gene_01513,  # DE-specific targets
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  background_correction = T
+)
+```
+
+**Lines 227-228**: **Figure 5f** - DE pattern
+```r
+FeaturePlot(eff_obj3$rds, features = grep("eff", colnames(eff_obj3$rds@meta.data), value = T)) + 
+  ggtitle("Pattern 2: DE")
+```
+
+**Key insight**: Same perturbation (CCDC6), different patterns in different cell types!
+
+##### Step 12: Cell-Type-Specific PS - LV/DUO cells (lines 232-249)
+
+**Lines 234-241**: LV/DUO-specific PS
+```r
+target_gene_47 <- rownames(mk1_47)[
+  abs(mk1_47$avg_log2FC) > 0.25 & mk1_47$p_val_adj < 0.05]
+
+eff_obj4 <- scmageck_eff_estimate(
+  rds_subset2, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = target_gene_47,  # LV/DUO-specific
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  background_correction = T
+)
+```
+
+**Line 247**: **Figure S10a** - LV/DUO pattern
+```r
+FeaturePlot(eff_obj4$rds, features = grep("eff", colnames(eff_obj4$rds@meta.data), value = T)) + 
+  ggtitle("Pattern 1: CCD6 PS score from LV/DUO")
+```
+
+##### Step 13: Cell-Type-Specific PS - DE-transition (lines 252-269)
+
+**Lines 254-261**: DE-transition-specific PS
+```r
+target_gene_c2 <- rownames(mk1_2_DE)[
+  abs(mk1_2_DE$avg_log2FC) > 0.25 & mk1_2_DE$p_val_adj < 0.05]
+
+eff_obj6 <- scmageck_eff_estimate(
+  rds_subset2, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = target_gene_c2,  # DE-transition-specific
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  background_correction = T
+)
+```
+
+**Line 267**: **Figure S10b** - DE-transition pattern
+```r
+FeaturePlot(eff_obj6$rds, features = grep("eff", colnames(eff_obj6$rds@meta.data), value = T)) + 
+  ggtitle("Pattern 2: CCD6 PS score from DE in transition")
+```
+
+
+#### Part 3: HHEX Analysis - Multiple Clones, Multiple Patterns (lines 271-484)
+
+**Scientific Context**: Three HHEX knockout clones (43, 44, 45) analyzed
+
+##### Step 14: Initial HHEX DE Analysis (lines 313-335)
+
+**Lines 314-317**: DE in different cell types
+```r
+mkhhex_1 <- FindMarkers(rds_subset3_rerun, group.by = "gene", ident.1 = "45-HHEX",
+                        ident.2 = "47-WT", subset.ident = c("0","1","5","13"), 
+                        logfc.threshold = 0.1)  # DE cells
+
+mkhhex_2 <- FindMarkers(rds_subset3_rerun, group.by = "gene", ident.1 = "45-HHEX",
+                        ident.2 = "47-WT", subset.ident = c("4","7","10"), 
+                        logfc.threshold = 0.1)  # LV/DUO cells
+
+mkhhex_3 <- FindMarkers(rds_subset3_rerun, group.by = "gene", ident.1 = "45-HHEX",
+                        ident.2 = "47-WT", subset.ident = c("6"), 
+                        logfc.threshold = 0.1)  # PP cells
+
+mkhhex_36812 <- FindMarkers(rds_subset3_rerun, group.by = "gene", ident.1 = "45-HHEX",
+                            ident.2 = "47-WT", subset.ident = c("3","6","8","12"), 
+                            logfc.threshold = 0.1)  # PP/PP-transition
+```
+
+**Lines 318-319**: DE using ALL three HHEX clones combined
+```r
+mkhhex_3_all <- FindMarkers(rds_subset3, group.by = "gene", 
+                            ident.1 = c("43-HHEX", "44-HHEX", "45-HHEX"),
+                            ident.2 = "47-WT", subset.ident = c("6"), 
+                            logfc.threshold = 0.1)
+
+mkhhex_36812_all <- FindMarkers(rds_subset3, group.by = "gene",
+                                ident.1 = c("43-HHEX", "44-HHEX", "45-HHEX"),
+                                ident.2 = "47-WT", subset.ident = c("3","6","8","12"),
+                                logfc.threshold = 0.1)
+```
+
+**Strategy**: Combine multiple clones for increased power
+
+##### Step 15: Define Cell-Type-Specific Target Genes (lines 339-344)
+
+**Lines 339-343**: Select targets with stringent thresholds
+```r
+hhex_cluster01513_target_gene <- mkhhex_1[
+  mkhhex_1$p_val_adj < 0.05 & abs(mkhhex_1$avg_log2FC) > 0.5, 1]
+
+hhex_cluster4710_target_gene <- mkhhex_2[
+  mkhhex_2$p_val_adj < 0.25, 1]  # Relaxed threshold (very few diff exp genes)
+
+hhex_cluster6_target_gene <- mkhhex_3[
+  mkhhex_3$p_val_adj < 0.05 & abs(mkhhex_3$avg_log2FC) > 0.75, 1]
+
+hhex_cluster36812_target_gene <- mkhhex_36812[
+  mkhhex_36812$p_val_adj < 0.05 & abs(mkhhex_36812$avg_log2FC) > 0.7, 1]
+```
+
+**Threshold tuning**: Different cell types need different stringency
+- LV/DUO: Relaxed (p < 0.25) - few DE genes
+- DE: Moderate (p < 0.05, |FC| > 0.5)
+- PP: Stringent (p < 0.05, |FC| > 0.75)
+
+##### Step 16: HHEX PS - DE Cells (lines 356-383)
+
+**Lines 361-367**: Calculate PS for DE cells
+```r
+eff_obj8 <- scmageck_eff_estimate(
+  rds_subset4, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = hhex_cluster01513_target_gene,  # DE-specific
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  lambda = 0.0,              # Disable regularization
+  background_correction = T
+)
+```
+
+**New parameter:**
+- `lambda = 0.0`: Disable L2 regularization penalty
+- When to use: Clean data, strong effects, want maximum sensitivity
+
+**Lines 371-382**: Visualize all three HHEX clones
+```r
+for(pb_i in 1:length(targetgenelist)){
+  pb <- targetgenelist[pb_i]
+  p <- FeaturePlot(rds_subset4_rerun, features = paste(pb, "eff", sep="_"))
+  print(p)
+  pb_gene <- targetgenelist_geneid[pb_i]
+  p <- FeaturePlot(rds_subset4_rerun, features = pb_gene)
+  print(p)
+}
+```
+
+##### Step 17: HHEX PS - PP/PP-transition (lines 387-410)
+
+**Lines 388-394**: PP/PP-transition PS
+```r
+eff_obj9 <- scmageck_eff_estimate(
+  rds_subset4, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = hhex_cluster36812_target_gene,  # PP-specific
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  lambda = 0.0,
+  background_correction = T
+)
+```
+
+##### Step 18: HHEX PS - LV/DUO Cells (lines 414-437)
+
+**Lines 415-421**: LV/DUO PS
+```r
+eff_obj10 <- scmageck_eff_estimate(
+  rds_subset4, bc_frame, targetgenelist, negative_ctrl_gene,
+  perturb_target_gene = hhex_cluster4710_target_gene,  # LV/DUO-specific
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = targetgenelist_geneid,
+  lambda = 0.0,
+  background_correction = T
+)
+```
+
+##### Step 19: Merge HHEX Clones for Combined Analysis (lines 440-472)
+
+**Lines 445-456**: Merge clone labels
+```r
+z <- rds_subset5$gene
+z[z == "43-HHEX"] <- "HHEX"
+z[z == "44-HHEX"] <- "HHEX"
+z[z == "45-HHEX"] <- "HHEX"
+rds_subset5 <- AddMetaData(rds_subset5, z, col.name = "gene")
+
+bc_frame2 <- bc_frame
+z <- bc_frame2$gene
+z[z == "43-HHEX"] <- "HHEX"
+z[z == "44-HHEX"] <- "HHEX"
+z[z == "45-HHEX"] <- "HHEX"
+bc_frame2$gene <- z
+```
+
+**Why merge?**: Increases statistical power by pooling all HHEX knockout cells
+
+##### Step 20: Calculate Combined HHEX PS (lines 461-477)
+
+**Lines 465-471**: PS with merged clones
+```r
+eff_obj11 <- scmageck_eff_estimate(
+  rds_subset5, bc_frame2, 
+  targetgenelist = c("HHEX"),                    # Single merged label
+  negative_ctrl_gene,
+  perturb_target_gene = hhex_cluster36812_target_gene,
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = c("HHEX"),          # Single gene ID
+  background_correction = T,
+  lambda = 0
+)
+```
+
+**Lines 482-483**: **Figure 5c** - Combined HHEX PS
+```r
+FeaturePlot(subset(rds_subset5_rerun, gene == "HHEX"), features = "HHEX_eff") + 
+  ggtitle("HHEX PS score")
+```
+
+#### Part 4: FOXA1 Analysis (lines 486-532)
+
+##### Step 21: FOXA1 PS Calculation (lines 497-511)
+
+**Lines 501-505**: Calculate PS for FOXA1 clones
+```r
+eff_obj12 <- scmageck_eff_estimate(
+  rds_subset6, bc_frame, 
+  targetgenelist = c("51-FOXA1", "53-FOXA1/2"),
+  negative_ctrl_gene,
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  perturb_gene_exp_id_list = c("FOXA1", "FOXA1"),  # Both target FOXA1
+  background_correction = T
+)
+```
+
+**Note**: Clone 53 targets both FOXA1 and FOXA2, but mapped to FOXA1 expression
+
+##### Step 22: Visualize FOXA1 Results (lines 515-532)
+
+**Line 516**: **Figure S9a** - FOXA1 PS (clone 51)
+```r
+FeaturePlot(eff_obj12$rds, features = "51-FOXA1_eff") + 
+  ggtitle("FOXA1 PS score (clone 51)")
+```
+
+**Line 522**: **Figure S9b** - FOXA1 PS (clone 53)
+```r
+FeaturePlot(eff_obj12$rds, features = "53-FOXA1/2_eff") + 
+  ggtitle("FOXA1 PS score (clone 53)")
+```
+
+**Line 530**: **Figure S9c** - FOXA1 expression
+```r
+FeaturePlot(rds_subset6_rerun, features = "FOXA1") + 
+  ggtitle("FOXA1 expression (all clones)")
+```
+
+### Input Requirements
+
+#### 1. Seurat Object (`10clones_seurat.rds`)
+
+**Characteristics:**
+- **10 clones**: 9 CRISPR knockouts + 1 wild-type control
+- **Multiple cell types**: DE, PP, LV/DUO, transition states
+- **Pre-clustered**: Seurat clusters already assigned
+- **Metadata includes**: Clone identity, guide counts, cluster assignments
+
+**Unique feature**: Guide assignments already in metadata (not separate file)
+
+#### 2. Clone Identity Mapping
+
+| Clone ID | Target Gene | Number of Clones |
+|----------|-------------|------------------|
+| 43-HHEX | HHEX | 1 of 3 |
+| 44-HHEX | HHEX | 2 of 3 |
+| 45-HHEX | HHEX | 3 of 3 |
+| 51-FOXA1 | FOXA1 | 1 of 2 |
+| 53-FOXA1/2 | FOXA1 + FOXA2 | 1 of 2 |
+| 57-OTUD5 | OTUD5 | 1 of 2 |
+| 58-OTUD5 | OTUD5 | 2 of 2 |
+| 61-CCDC6 | CCDC6 | 1 of 2 |
+| 62-CCDC6 | CCDC6 | 2 of 2 |
+| 47-WT | None (control) | 1 |
+
+### Output
+
+#### 1. Publication Figures
+
+**Main Figures:**
+- **Figure 5c**: HHEX PS score (combined clones)
+- **Figure 5f**: CCDC6 PS patterns (PP vs DE)
+
+**Supplementary Figures:**
+- **Figure S9a**: FOXA1 PS (clone 51)
+- **Figure S9b**: FOXA1 PS (clone 53)
+- **Figure S9c**: FOXA1 expression
+- **Figure S10a**: CCDC6 PS in LV/DUO
+- **Figure S10b**: CCDC6 PS in DE-transition
+
+#### 2. Multiple PS Score Versions per Gene
+
+For each perturbation, multiple PS scores calculated:
+- **Global PS**: Using all differentially expressed genes
+- **Cell-type-specific PS**: Using genes DE in specific cell types
+- **Different patterns**: Same gene, different cell types
+
+Example for CCDC6:
+- `61-CCDC6_eff` (global)
+- `61-CCDC6_eff_PP` (PP-specific targets)
+- `61-CCDC6_eff_DE` (DE-specific targets)
+- `61-CCDC6_eff_LV` (LV/DUO-specific targets)
+
+#### 3. Differential Expression Tables
+
+Saved to `table/` directory:
+- Cell-type-specific DE results
+- Multiple comparisons per perturbation
+- Merged comparisons across cell types
+
+### Key Biological Insights
+
+**Discovery 1: Context-dependent perturbation responses**
+- Same genetic perturbation → different transcriptional responses in different cell types
+- Cannot use single PS calculation for heterogeneous datasets
+
+**Discovery 2: Cell-type-specific target genes improve PS accuracy**
+- Custom target gene selection per cell type reveals patterns missed by global analysis
+- Different thresholds needed for different cell types (some have subtle effects)
+
+**Discovery 3: Multiple clones can be combined**
+- Merging clones with same target increases statistical power
+- Useful when individual clones have low cell counts
+
+**Discovery 4: Developmental stage matters**
+- Transition states (DE-transition, PP-transition) show intermediate patterns
+- Perturbation effects depend on differentiation stage
+
+### Advanced Techniques Demonstrated
+
+1. **Cell-type-specific DE analysis** with `subset.ident`
+2. **Custom target gene selection** with `perturb_target_gene`
+3. **Background correction** to remove control correlations
+4. **Lambda tuning** for regularization control
+5. **Scale factor optimization** for subtle developmental effects
+6. **Clone merging** for increased statistical power
+7. **Threshold adaptation** per cell type
+8. **Multi-pattern discovery** from single perturbation
+
+### scMAGeCK Parameters - Complete Reference
+
+Based on usage in this workflow:
+
+```r
+scmageck_eff_estimate(
+  RDS,                           # Seurat object
+  BARCODE,                       # Barcode data frame
+  perturb_gene,                  # Gene(s) to calculate PS for
+  non_target_ctrl,               # Control label
+  
+  # Optional - commonly used:
+  scale_factor = 6,              # Amplification factor (1-10, default 3)
+  assay_for_cor = "RNA",         # Which assay to use
+  perturb_gene_exp_id_list,      # Map clone IDs to gene expression IDs
+  
+  # Advanced:
+  perturb_target_gene,           # Custom target genes (override auto-discovery)
+  target_gene_min = 50,          # Minimum target genes (default 30)
+  target_gene_max = 100,         # Maximum target genes (default 200)
+  lambda = 0.0,                  # Regularization penalty (default 0.01)
+  background_correction = TRUE,  # Remove control correlations (default FALSE)
+  subset_rds = TRUE              # Return only guide-containing cells (default FALSE)
+)
+```
+
+### Parameter Tuning Guide
+
+**scale_factor**: How much to amplify PS scores
+- Default: 3
+- Weak effects (developmental): 5-10
+- Strong effects (essential genes): 1-3
+- This workflow: 6 (subtle developmental effects)
+
+**target_gene_max/min**: Number of target genes to use
+- Default: 30-200
+- Subtle effects: 50-100 (more genes = better signal)
+- Strong effects: 20-50 (fewer genes sufficient)
+- This workflow: Varies by cell type
+
+**lambda**: L2 regularization penalty
+- Default: 0.01
+- Clean data: 0 (no regularization needed)
+- Noisy data: 0.01-0.1 (penalize overfitting)
+- This workflow: 0 (high-quality data)
+
+**background_correction**: Remove control cell correlations
+- Default: FALSE
+- Use when: Control cells show structure unrelated to perturbation
+- This workflow: TRUE (removes developmental gradients from controls)
+
+### Usage Example - Adapt to Your Dataset
+
+```r
+# Scenario: Multi-cell-type perturbation screen
+
+# 1. Identify cell types in your data
+DimPlot(sobj, group.by = "seurat_clusters")
+# Annotate clusters manually
+
+# 2. For each perturbation, find DE genes per cell type
+de_celltype1 <- FindMarkers(sobj, ident.1 = "Perturbation", ident.2 = "Control",
+                            subset.ident = clusters_celltype1)
+de_celltype2 <- FindMarkers(sobj, ident.1 = "Perturbation", ident.2 = "Control",
+                            subset.ident = clusters_celltype2)
+
+# 3. Select target genes with appropriate thresholds
+targets_celltype1 <- rownames(de_celltype1)[
+  abs(de_celltype1$avg_log2FC) > 0.25 & de_celltype1$p_val_adj < 0.05]
+targets_celltype2 <- rownames(de_celltype2)[
+  abs(de_celltype2$avg_log2FC) > 0.25 & de_celltype2$p_val_adj < 0.05]
+
+# 4. Calculate cell-type-specific PS
+ps_celltype1 <- scmageck_eff_estimate(
+  sobj, bc_frame, "Perturbation", "Control",
+  perturb_target_gene = targets_celltype1,
+  scale_factor = 6,
+  background_correction = TRUE
+)
+
+ps_celltype2 <- scmageck_eff_estimate(
+  sobj, bc_frame, "Perturbation", "Control",
+  perturb_target_gene = targets_celltype2,
+  scale_factor = 6,
+  background_correction = TRUE
+)
+
+# 5. Compare patterns
+FeaturePlot(ps_celltype1$rds, features = "Perturbation_eff") + ggtitle("Cell Type 1")
+FeaturePlot(ps_celltype2$rds, features = "Perturbation_eff") + ggtitle("Cell Type 2")
+```
+
+### Dependencies
+
+#### R Packages
+- **Seurat**: Single-cell framework
+- **scMAGeCK**: PS calculation
+- **ggplot2**: Visualization
+- **hdf5r**: File I/O
+- **dplyr**: Data manipulation
+
+### Common Issues and Solutions
+
+**Issue 1**: Different patterns not visible
+```r
+# Solution: Use cell-type-specific target genes, not global
+# Calculate DE per cell type, then use perturb_target_gene
+```
+
+**Issue 2**: PS scores too weak
+```r
+# Solution 1: Increase scale_factor (try 6-10)
+# Solution 2: Relax target gene thresholds (more genes)
+# Solution 3: Enable background_correction
+```
+
+**Issue 3**: Clone merging causes errors
+```r
+# Solution: Ensure both metadata and barcode frame updated
+# Check: table(rds$gene) and table(bc_frame$gene) should match
+```
+
+**Issue 4**: Not enough target genes found
+```r
+# Check DE results
+table(de_results$p_val_adj < 0.05)  # How many significant?
+
+# Solution: Relax thresholds
+targets <- rownames(de_results)[
+  abs(de_results$avg_log2FC) > 0.1 &  # Lower from 0.25
+  de_results$p_val_adj < 0.1]          # Lower from 0.05
+```
+
+**Issue 5**: Control cells cluster with perturbed cells
+```r
+# Solution: Enable background_correction = TRUE
+# This removes correlations present in control population
+```
+
+### Best Practices for Heterogeneous Datasets
+
+1. **Cluster first**, annotate cell types
+2. **Run DE per cell type** separately
+3. **Inspect DE results** to choose appropriate thresholds
+4. **Calculate cell-type-specific PS** using `perturb_target_gene`
+5. **Compare patterns** across cell types
+6. **Merge clones** if needed for power
+7. **Tune parameters** based on effect size
+8. **Validate** with known marker genes
+
+---
+
