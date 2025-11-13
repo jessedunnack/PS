@@ -799,3 +799,518 @@ make.names('SNP-36')  # Returns 'SNP.36'
 
 ---
 
+## Workflow 3: HIV Perturb-seq Dataset
+
+**File**: `datasets/HIV_Perturb-seq/hiv_perturbseq.Rmd`
+**Lines of Code**: 326
+**Level**: Advanced
+**Time to Run**: 1-2 hours
+**Data Type**: CRISPR Perturb-seq (HIV latency screen)
+**Publication**: HIV reactivation screen studying BRD4, CCNT1, and other targets
+**Authors**: Bicna Song, Wei Li (Children's National Hospital)
+
+### Purpose
+
+This workflow demonstrates **publication-quality analysis** of a real Perturb-seq dataset studying HIV latency. It showcases:
+
+1. Working with pre-integrated multi-sample Seurat objects
+2. Comprehensive QC and clustering analysis
+3. Multi-perturbation PS score calculation
+4. Advanced downstream analysis (differential expression, signature scoring)
+5. Identifying perturbation-responsive subpopulations
+6. Publication-quality figure generation
+
+### When to Use This Workflow
+
+✅ **Use if:**
+- Analyzing multi-gene CRISPR screens
+- Working with pre-integrated Seurat objects
+- Need publication-quality analysis examples
+- Studying biological phenotypes (e.g., HIV reactivation)
+- Want advanced downstream analysis patterns
+
+❌ **Don't use if:**
+- You need basic preprocessing (see Demo 2)
+- You're new to PS analysis (start with Demo 1)
+- You need cell-type-specific analysis (see Workflow 4)
+
+### Scientific Context
+
+**Research Question**: Which genes regulate HIV latency reversal?
+**Approach**: CRISPR knockout screen with HIV-GFP reporter
+**Key Findings**:
+- BRD4 knockout induces HIV reactivation (high GFP) in subset of cells
+- CCNT1 knockout shows similar effect
+- PS scores identify specific responder subpopulation (cluster 8)
+
+### Algorithm - Step by Step
+
+#### Step 1: Setup and Load Data (lines 18-27)
+
+```r
+library(Seurat)
+library(scMAGeCK)
+library(ggplot2)
+library(hdf5r)
+
+feat_c = readRDS(file = "JKLAT_H13Ld2EGFP.combined.rds")
+BARCODE = 'BARCODE_H13Ld2EGFP.txt'
+```
+
+**Input**: Pre-integrated Seurat object
+- Multiple samples combined
+- Already normalized and integrated
+- Contains HIV-GFP reporter expression
+
+#### Step 2: Visualize Guide Distribution (lines 34-39)
+
+**Line 34**: Visualize guide distribution across cells
+```r
+featurePlot(RDS = feat_c, BARCODE = BARCODE, TYPE = "Dis")
+```
+
+**Line 38**: Add guide metadata to Seurat object
+```r
+feat_c = pre_processRDS(BARCODE = BARCODE, RDS = feat_c)
+```
+
+**What this does:**
+- Parses barcode file
+- Adds guide identity to cell metadata
+- Calculates guide UMI counts
+- Identifies singlets (cells with 1 guide) vs multiplets
+
+#### Step 3: Filter for Singlet Cells (lines 41-43)
+
+```r
+feat_c_singlet = subset(x = feat_c, subset = nFeature_sgRNA_guides == 1)
+```
+
+**Why singlets only?**
+- Cells with 1 guide = unambiguous perturbation identity
+- Cells with multiple guides = confounded effects
+- Standard practice in Perturb-seq analysis
+
+#### Step 4: Quality Control (lines 46-60)
+
+**Lines 47-48**: Visualize QC metrics by sample
+```r
+feat_c_singlet <- SetIdent(feat_c_singlet, value = "orig.ident")
+VlnPlot(feat_c_singlet, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+**Line 53**: Apply QC filters
+```r
+feat_c_singlet <- subset(feat_c_singlet, subset = 
+  nFeature_RNA > 200 & nFeature_RNA < 7500 & percent.mt < 15)
+```
+
+**Filters explained:**
+- `nFeature_RNA > 200`: Remove low-quality cells (too few genes)
+- `nFeature_RNA < 7500`: Remove doublets (too many genes)
+- `percent.mt < 15`: Remove dying cells (high mitochondrial %)
+
+**Lines 58-60**: Recheck QC after filtering
+```r
+VlnPlot(feat_c_singlet, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+#### Step 5: Standard Seurat Workflow (lines 73-133)
+
+**Lines 75-76**: Normalization and variable feature selection
+```r
+feat_c_singlet <- NormalizeData(feat_c_singlet, normalization.method = "LogNormalize", scale.factor = 10000)
+feat_c_singlet <- FindVariableFeatures(feat_c_singlet, selection.method = "vst", nfeatures = 2000)
+```
+
+**Lines 78-87**: Identify and plot top variable genes
+```r
+top10 <- head(VariableFeatures(feat_c_singlet), 10)
+plot1 <- VariableFeaturePlot(feat_c_singlet)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+```
+
+**Line 92**: Scale data
+```r
+feat_c_singlet <- ScaleData(feat_c_singlet)
+```
+
+**Lines 95-96**: PCA
+```r
+feat_c_singlet <- RunPCA(feat_c_singlet, features = VariableFeatures(object = feat_c_singlet))
+print(feat_c_singlet[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+**Lines 111-112**: Determine dimensionality with JackStraw
+```r
+feat_c_singlet <- JackStraw(feat_c_singlet, num.replicate = 100)
+feat_c_singlet <- ScoreJackStraw(feat_c_singlet, dims = 1:20)
+```
+
+**JackStraw analysis**: Statistical test to determine significant PCs
+- Resamples data 100 times
+- Tests significance of each PC
+- Guides choice of dimensions for clustering
+
+**Lines 123-125**: Clustering
+```r
+feat_c_singlet <- FindNeighbors(feat_c_singlet, dims = 1:10)
+feat_c_singlet <- FindClusters(feat_c_singlet, resolution = 0.5)
+head(Idents(feat_c_singlet), 5)
+```
+
+**Lines 127-132**: UMAP
+```r
+feat_c_singlet <- RunUMAP(feat_c_singlet, dims = 1:10)
+DimPlot(feat_c_singlet, reduction = "umap")
+DimPlot(feat_c_singlet, reduction = "umap", group.by = "orig.ident")
+```
+
+#### Step 6: Guide Expression Visualization (lines 149-176)
+
+**Lines 149-155**: Get list of perturbed genes
+```r
+DefaultAssay(feat_c_singlet) <- "sgRNA"
+perturbed_gene_list <- feat_c_singlet@assays[["sgRNA"]]@counts@Dimnames[[1]]
+perturbed_gene_list <- perturbed_gene_list[-4]  # Remove one guide
+```
+
+**Lines 159-163**: Plot all guide distributions
+```r
+for (i in perturbed_gene_list) {
+  print(i)
+  FeaturePlot(feat_c_singlet, features = i)
+  ggsave(paste0(i,"_sgrnaplot.jpg"), plot = last_plot(), device = "jpg", width = 7, height = 5)
+}
+```
+
+**Lines 167-176**: Plot target gene expression
+```r
+DefaultAssay(feat_c_singlet) <- "RNA"
+for (i in perturbed_gene_list) {
+  FeaturePlot(feat_c_singlet, features = i)
+  ggsave(paste0(i,"_featureplot.jpg"), plot = last_plot(), device = "jpg", width = 7, height = 5)
+}
+```
+
+**Key comparison**: Guide presence vs gene expression
+- Shows knockout efficiency
+- Validates guide-gene linkage
+
+#### Step 7: Prepare for PS Calculation (lines 189-195)
+
+**Line 185**: Check guide distribution
+```r
+table(feat_c_singlet@meta.data$gene)
+```
+
+**Line 190**: Load barcode frame
+```r
+bc_frame = read.table(BARCODE, header = T)
+```
+
+**Line 194**: Define control
+```r
+non_target_ctrl = "Non-Targeting"
+```
+
+#### Step 8: Calculate PS Scores for All Perturbations (lines 198-204)
+
+**Lines 198-199**: Multi-gene PS calculation
+```r
+eff_obj <- scmageck_eff_estimate(
+  feat_c_singlet, bc_frame,
+  perturb_gene = perturbed_gene_list,  # All genes at once
+  non_target_ctrl,
+  scale_factor = 3  # Adjust for effect size
+)
+```
+
+**Parameters:**
+- `perturb_gene = perturbed_gene_list`: Calculate PS for multiple genes
+- `scale_factor = 3`: Amplifies PS scores for visualization
+- Higher scale_factor = more sensitive to small effects
+
+**Lines 202-203**: Extract results
+```r
+eff_estimat = eff_obj$eff_matrix
+rds_subset = eff_obj$rds
+```
+
+#### Step 9: Visualize PS Scores and Phenotype (lines 207-242)
+
+**Line 208**: Check updated object
+```r
+DefaultAssay(rds_subset) <- "RNA"
+DimPlot(rds_subset, group.by = "orig.ident")
+```
+
+**Line 212**: Color by perturbation
+```r
+DimPlot(rds_subset, group.by = "gene")
+```
+
+**Lines 218-227**: Plot all PS scores
+```r
+for(pb in perturbed_gene_list){
+  p = FeaturePlot(rds_subset, features = paste(pb,'eff',sep='_'))
+  print(p)
+  p = FeaturePlot(rds_subset, features = pb)
+  print(p)
+}
+```
+
+**Line 218**: **Figure 4d** - HIV-GFP expression (phenotype)
+```r
+FeaturePlot(rds_subset, features = "H13Ld2EGFP", order = TRUE)
+```
+- `H13Ld2EGFP`: HIV reporter gene
+- `order = TRUE`: Plot high values on top
+- Shows HIV reactivation pattern
+
+**Lines 233-234**: **Figure 4c** - BRD4 PS score
+```r
+pb = "BRD4"
+FeaturePlot(rds_subset, features = paste(pb,'eff',sep='_'), order = TRUE) + ggtitle("BRD4 PS score")
+```
+
+**Lines 240-241**: **Figure 4f** - CCNT1 PS score
+```r
+pb = "CCNT1"
+FeaturePlot(rds_subset, features = paste(pb,'eff',sep='_'), order = TRUE) + ggtitle("CCNT1 PS score")
+```
+
+#### Step 10: Identify Marker Genes for Responsive Cluster (lines 246-262)
+
+**Line 247**: Find markers for cluster 8
+```r
+cluster8.markers <- FindMarkers(feat_c_singlet, ident.1 = 8, min.pct = 0.25)
+```
+
+**Why cluster 8?**
+- Visual inspection revealed BRD4 PS-high cells cluster here
+- Distinct transcriptional state
+- Hypothesis: This cluster represents HIV-reactivatable cells
+
+**Lines 251-255**: Export marker genes
+```r
+head(cluster8.markers, n = 10)
+write.table(cluster8.markers, file = 'cluster8_markers.txt', sep = '\t', quote = F, row.names = T)
+```
+
+**Lines 259-261**: Alternative marker search (no filter)
+```r
+cluster8.markers.2 <- FindMarkers(feat_c_singlet, ident.1 = 8)
+write.table(cluster8.markers.2, file = 'cluster8_markers.v2.txt', sep = '\t', quote = F, row.names = T)
+```
+
+#### Step 11: BRD4 Target Gene Signature Analysis (lines 268-285)
+
+**Line 269**: Subset to BRD4-perturbed cells only
+```r
+rds_brd4 <- subset(feat_c_singlet, cells = rownames(feat_c_singlet@meta.data)[feat_c_singlet@meta.data$gene == 'BRD4'])
+```
+
+**Lines 271-272**: Load BRD4 target genes
+```r
+brd4_target <- read.table('BRD4_targets.txt', header = T)
+brd4_target <- brd4_target[,1]
+```
+
+**Lines 273-276**: Calculate signature score
+```r
+z <- GetAssayData(rds_brd4)
+z <- z[rownames(z) %in% brd4_target,]
+zmean <- colMeans(z)  # Average expression of BRD4 targets
+rds_brd4 <- AddMetaData(rds_brd4, zmean, col.name = 'BRD4_targets')
+```
+
+**Lines 277-284**: **Figure S6e** - Compare signature across clusters
+```r
+z <- rds_brd4@meta.data
+z$cluster <- ifelse(z$seurat_clusters == 8, 'Cluster 8', 'Others')
+wxs <- wilcox.test(z$BRD4_targets[z$seurat_clusters == 8],
+                   z$BRD4_targets[z$seurat_clusters != 8])
+ggplot(z, aes(x = cluster, y = BRD4_targets, fill = cluster)) + 
+  geom_violin() +
+  geom_jitter(shape = 16, position = position_jitter(0.2)) +
+  theme_classic() +
+  ggtitle('BRD4 targets', subtitle = paste('p=', wxs$p.value))
+```
+
+**Key finding**: Cluster 8 has significantly different BRD4 target expression
+
+#### Step 12: Differential Expression in BRD4 PS+ Cells (lines 289-318)
+
+**Lines 290-292**: Add BRD4 guide presence metadata
+```r
+gene_e <- GetAssayData(feat_c_singlet, assay = 'sgRNA')
+pfr <- ifelse(gene_e['BRD4',] > 0, 1, 0)
+feat_c_singlet <- AddMetaData(feat_c_singlet, pfr, col.name = 'BRD4_guides')
+```
+
+**Lines 296-300**: **Figure S6f** - DE analysis within cluster 8
+```r
+rds_cluster8 <- subset(feat_c_singlet, idents = '8')
+de_brd4 = FindMarkers(rds_cluster8, ident.1 = 1, ident.2 = 0, group.by = 'BRD4_guides')
+```
+- Compares cluster 8 cells WITH vs WITHOUT BRD4 guides
+- Identifies BRD4-specific effects in responsive cluster
+
+**Lines 305-308**: Alternative - Compare to ALL other cells
+```r
+pfr2 <- ifelse(pfr == 1 & feat_c_singlet$seurat_clusters == '8', 1, 0)
+feat_c_singlet <- AddMetaData(feat_c_singlet, pfr2, col.name = 'cluster8_BRD4_guides')
+de_brd4_2 <- FindMarkers(feat_c_singlet, ident.1 = 1, ident.2 = 0, group.by = 'cluster8_BRD4_guides')
+```
+
+**Lines 312-317**: Volcano plot with HIV-GFP highlighted
+```r
+de_brd4_2$colors <- ifelse(rownames(de_brd4_2) == "H13Ld2EGFP", "red", "black")
+plot(de_brd4_2$avg_log2FC, -log10(de_brd4_2$p_val_adj),
+     pch = 20, xlab = 'log2 Fold Change', ylab = '-log10 (adj p value)',
+     col = de_brd4_2$colors) + title(main = "Cells with strong BRD4 perturbation vs. other cells")
+text(2.2, 11, labels = "GFP", col = "red")
+```
+
+**Key result**: HIV-GFP is top upregulated gene in BRD4 PS-high cells
+
+### Input Requirements
+
+#### 1. Seurat Object (`JKLAT_H13Ld2EGFP.combined.rds`)
+- **Type**: Combined/integrated Seurat object
+- **Assays**: RNA, sgRNA
+- **Status**: Pre-normalized, pre-integrated
+- **Contains**: HIV-GFP reporter expression (`H13Ld2EGFP` gene)
+
+#### 2. Barcode File (`BARCODE_H13Ld2EGFP.txt`)
+- **Size**: 1.9 MB (large, many cells)
+- **Format**: Standard barcode format (cell, barcode, sgrna, gene, read_count, umi_count)
+
+#### 3. BRD4 Target Genes (`BRD4_targets.txt`)
+- **Source**: Literature/databases (genes regulated by BRD4)
+- **Format**: One gene per line
+- **Purpose**: Gene signature scoring
+
+### Output
+
+#### 1. PS Scores for Multiple Perturbations
+- BRD4_eff, CCNT1_eff, and others
+- Added to Seurat metadata
+- Visualized on UMAP
+
+#### 2. Publication Figures
+- Figure 4b: UMAP by sample
+- Figure 4c: BRD4 PS score distribution
+- Figure 4d: HIV-GFP expression
+- Figure 4f: CCNT1 PS score distribution
+- Figure S6a: QC violin plots
+- Figure S6b: Clustering UMAP
+- Figure S6d: BRD4 guide distribution
+- Figure S6e: BRD4 target signature comparison
+- Figure S6f: Volcano plot
+
+#### 3. Marker Gene Tables
+- `cluster8_markers.txt`: Cluster 8 defining genes
+- `cluster8_markers.v2.txt`: Unfiltered markers
+- Differential expression results
+
+### Key Biological Insights
+
+**Discovery 1: PS reveals responsive subpopulation**
+- Not all BRD4-knockout cells respond equally
+- Cluster 8 enriched for high PS scores
+- Represents HIV-reactivatable cell state
+
+**Discovery 2: BRD4 PS correlates with HIV reactivation**
+- High BRD4 PS → High HIV-GFP expression
+- PS score is better predictor than BRD4 expression alone
+- Validates PS method for phenotypic studies
+
+**Discovery 3: Cluster 8 has distinct BRD4 target signature**
+- BRD4 target genes expressed differently
+- Pre-existing transcriptional state
+- Permissive for HIV reactivation
+
+### Advanced Analysis Patterns Demonstrated
+
+1. **Multi-perturbation analysis**: Calculate PS for many genes at once
+2. **Signature scoring**: Aggregate expression of gene sets
+3. **Cluster-specific DE**: Find markers defining responsive populations
+4. **Conditional DE**: Compare perturbed vs control within clusters
+5. **Phenotype correlation**: Link PS scores to biological readout (GFP)
+6. **Statistical testing**: Wilcoxon tests for group comparisons
+
+### Usage Example - Adapt to Your Screen
+
+```r
+# For a different CRISPR screen with phenotype
+
+# 1. Load your data
+sobj = readRDS("your_perturbseq.rds")
+bc_frame = read.table("your_barcodes.txt", header = T)
+
+# 2. Get list of perturbed genes
+gene_list = unique(bc_frame$gene)
+gene_list = gene_list[gene_list != "Non-Targeting"]  # Remove control
+
+# 3. Calculate PS for all genes
+eff_obj <- scmageck_eff_estimate(
+  sobj, bc_frame,
+  perturb_gene = gene_list,
+  non_target_ctrl = "Non-Targeting",
+  scale_factor = 3
+)
+
+# 4. Identify phenotype-associated perturbations
+# (correlate PS scores with your phenotype of interest)
+phenotype = FetchData(eff_obj$rds, vars = "YOUR_PHENOTYPE_GENE")
+ps_scores = FetchData(eff_obj$rds, vars = grep("_eff", colnames(eff_obj$rds@meta.data), value = T))
+
+cors = cor(phenotype, ps_scores, method = "spearman")
+print(sort(cors[1,], decreasing = TRUE))  # Top hits
+```
+
+### Dependencies
+
+#### R Packages
+- **Seurat**: Single-cell framework
+- **scMAGeCK**: PS calculation
+- **ggplot2**: Plotting
+- **hdf5r**: Reading H5 files (if needed)
+
+#### External Files
+- BRD4 target gene list (optional, for signature analysis)
+
+### Common Issues and Solutions
+
+**Issue 1**: Cluster identification differs
+```r
+# Solution: Clustering is stochastic; set seed for reproducibility
+set.seed(42)
+feat_c_singlet <- FindClusters(feat_c_singlet, resolution = 0.5)
+```
+
+**Issue 2**: Scale factor too high/low
+```r
+# PS scores too high (>2): reduce scale_factor
+# PS scores too low (<0.2): increase scale_factor
+# Typical range: 1-5
+```
+
+**Issue 3**: Not enough control cells
+```r
+# Check control cell count
+table(bc_frame$gene)["Non-Targeting"]
+# Need at least 50-100 for robust statistics
+```
+
+**Issue 4**: Memory issues with JackStraw
+```r
+# JackStraw is memory-intensive; can skip for large datasets
+# Use ElbowPlot instead to choose dimensions
+ElbowPlot(sobj)
+```
+
+---
+
