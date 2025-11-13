@@ -2084,3 +2084,400 @@ targets <- rownames(de_results)[
 
 ---
 
+## scMAGeCK Functions Reference
+
+This section documents all scMAGeCK functions used across the four workflows. These are the core functions that enable PS analysis.
+
+### Function Inventory
+
+| Function | Type | Purpose | Used In |
+|----------|------|---------|---------|
+| scmageck_eff_estimate | Core | Calculate PS scores | All workflows |
+| guidematrix_to_triplet | Utility | Convert guide matrix to barcode format | Demo 2, HIV, Pancreatic |
+| pre_processRDS | Utility | Add guide metadata to Seurat | Demo 2, HIV, Pancreatic |
+| featurePlot | Visualization | Plot guide distribution | HIV |
+
+---
+
+### scmageck_eff_estimate()
+
+**Purpose**: Core function to calculate Perturbation-response Score (PS) for single cells
+
+**Category**: Analysis / PS Calculation
+
+**File References**:
+- demo/demo1/ps_demo.R:26-27
+- demo/demo2/PS_demo2.Rmd:125-126
+- datasets/HIV_Perturb-seq/hiv_perturbseq.Rmd:198-199
+- datasets/Pancreatic_differentiation_scRNA-seq/pancreatic_scrnaseq.Rmd:71-73 (and many more)
+
+#### Algorithm
+
+**What it does** (conceptual overview):
+
+1. **Identify cell populations** (lines internal to function):
+   - Extract cells with perturbation guides
+   - Extract cells with control guides
+   - Validate sufficient cells in each group (typically >10 per group)
+
+2. **Differential expression analysis**:
+   - Compare perturbation vs control cells
+   - Find significantly differentially expressed genes
+   - Rank genes by effect size and significance
+
+3. **Target gene selection**:
+   - If `perturb_target_gene` provided: use specified genes
+   - Otherwise: auto-select top DE genes
+   - Filter by `target_gene_min` and `target_gene_max` parameters
+   - Default: 30-200 genes
+
+4. **Expression signature calculation**:
+   - For each cell, calculate signature score based on target genes
+   - Weighted by gene importance (fold change, p-value)
+   - Normalize across cells
+
+5. **Background correction** (if `background_correction = TRUE`):
+   - Calculate correlation structure in control cells
+   - Remove background correlations from perturbation signature
+   - Reduces false positives from cell type/state effects
+
+6. **PS score calculation**:
+   - Scale signature scores by `scale_factor`
+   - Clip negative values to zero (PS ≥ 0)
+   - Higher score = stronger perturbation response
+
+7. **Return results**:
+   - Add PS scores to Seurat metadata as `{gene}_eff`
+   - Return both PS matrix and updated Seurat object
+
+#### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| **RDS** | Seurat object | required | Seurat object with normalized RNA expression |
+| **BARCODE** | data.frame | required | Barcode table (cell, barcode, sgrna, gene, read_count, umi_count) |
+| **perturb_gene** | character vector | required | Gene(s) to calculate PS for |
+| **non_target_ctrl** | character | required | Label for non-targeting control cells |
+| scale_factor | numeric | 3 | Amplification factor for PS scores (1-10) |
+| assay_for_cor | character | "RNA" | Which assay to use for correlation |
+| perturb_gene_exp_id_list | character vector | NULL | Map perturbation labels to gene expression IDs |
+| perturb_target_gene | character vector | NULL | Custom target genes (overrides auto-discovery) |
+| target_gene_min | integer | 30 | Minimum number of target genes to use |
+| target_gene_max | integer | 200 | Maximum number of target genes to use |
+| lambda | numeric | 0.01 | L2 regularization penalty (0 = no regularization) |
+| background_correction | logical | FALSE | Remove control cell correlations |
+| subset_rds | logical | FALSE | Return only cells with guide assignments |
+
+#### Return Value
+
+**Type**: List with two components
+
+**Structure**:
+```r
+list(
+  eff_matrix = matrix,      # PS score matrix (cells × genes)
+  rds = Seurat object       # Updated Seurat object
+)
+```
+
+**eff_matrix**: Matrix of PS scores
+- Rows: Cell barcodes
+- Columns: Perturbation genes
+- Values: PS scores (typically 0 to 1+)
+- Interpretation: Higher = stronger perturbation response
+
+**rds**: Seurat object with added metadata
+- New columns: `{gene}_eff` for each perturbation
+- Example: If `perturb_gene = "TP53"`, adds column `TP53_eff`
+- If `subset_rds = TRUE`: Only returns cells with guides
+- If `subset_rds = FALSE`: All cells (non-guide cells have NA)
+
+#### Usage Examples
+
+**Example 1: Basic usage** (from Demo 1)
+```r
+eff_object <- scmageck_eff_estimate(
+  rds_object,
+  bc_frame,
+  perturb_gene = 'TP53',
+  non_target_ctrl = 'NonTargetingControlGuideForHuman'
+)
+
+# Extract results
+ps_scores = eff_object$eff_matrix
+rds_updated = eff_object$rds
+
+# Visualize
+FeaturePlot(rds_updated, features = 'TP53_eff')
+```
+
+**Example 2: Multiple genes** (from HIV workflow)
+```r
+eff_obj <- scmageck_eff_estimate(
+  sobj,
+  bc_frame,
+  perturb_gene = c('BRD4', 'CCNT1', 'CDK9'),
+  non_target_ctrl = 'Non-Targeting',
+  scale_factor = 3
+)
+
+# Now have: BRD4_eff, CCNT1_eff, CDK9_eff in metadata
+```
+
+**Example 3: Custom target genes** (from Pancreatic workflow)
+```r
+# First, find DE genes
+de_results <- FindMarkers(sobj, ident.1 = "Perturbation", ident.2 = "Control")
+target_genes <- rownames(de_results)[
+  abs(de_results$avg_log2FC) > 0.25 & de_results$p_val_adj < 0.05]
+
+# Then, use custom targets
+eff_obj <- scmageck_eff_estimate(
+  sobj,
+  bc_frame,
+  perturb_gene = 'CCDC6',
+  non_target_ctrl = '47-WT',
+  perturb_target_gene = target_genes,  # Custom targets
+  scale_factor = 6,
+  background_correction = TRUE
+)
+```
+
+**Example 4: Advanced parameters** (from Pancreatic workflow)
+```r
+eff_obj <- scmageck_eff_estimate(
+  sobj,
+  bc_frame,
+  perturb_gene = 'HHEX',
+  non_target_ctrl = '47-WT',
+  perturb_target_gene = custom_targets,
+  scale_factor = 6,
+  assay_for_cor = "RNA",
+  lambda = 0.0,                      # Disable regularization
+  background_correction = TRUE,      # Remove control structure
+  target_gene_min = 50,
+  target_gene_max = 100
+)
+```
+
+#### Dependencies
+
+**Required packages:**
+- Seurat: For Seurat object handling
+- Matrix: For sparse matrix operations (usually loaded by Seurat)
+
+**Calls internally:**
+- Seurat differential expression functions
+- Statistical tests (Wilcoxon, t-test)
+- Correlation calculations
+
+#### Common Issues
+
+**Issue 1**: "Not enough cells in perturbation group"
+- **Cause**: Fewer than ~10 cells with the perturbation guide
+- **Solution**: Check guide distribution with `table(bc_frame$gene)`
+- **Workaround**: Merge similar perturbations or use lower filtering thresholds
+
+**Issue 2**: PS scores all very low (<0.1)
+- **Cause**: Weak perturbation effect or scale_factor too low
+- **Solution**: Increase `scale_factor` (try 5-10)
+- **Alternative**: Relax `target_gene_max` to include more genes
+
+**Issue 3**: PS scores all very high (>5)
+- **Cause**: Strong perturbation effect or scale_factor too high
+- **Solution**: Decrease `scale_factor` (try 1-2)
+
+**Issue 4**: PS scores don't match biological expectation
+- **Cause**: Background structure (cell type, cell cycle) dominates signal
+- **Solution**: Enable `background_correction = TRUE`
+- **Alternative**: Regress out confounders before PS calculation
+
+**Issue 5**: Gene name mismatch error
+- **Cause**: `perturb_gene_exp_id_list` doesn't match actual gene names
+- **Solution**: Check gene names with `rownames(sobj)` and ensure exact match
+- **Example**: "TP53" in expression but labeled "p53" in barcode file
+
+**Issue 6**: Function runs very slowly
+- **Cause**: Large dataset or many perturbations
+- **Solution**: Run perturbations separately, or subset to cells of interest
+- **Optimization**: Use `subset_rds = TRUE` to reduce output size
+
+---
+
+### guidematrix_to_triplet()
+
+**Purpose**: Convert guide count matrix (guides × cells) to long-format barcode table
+
+**Category**: Utility / Data Transformation
+
+**File References**:
+- demo/demo1/ps_demo.R:9 (commented example)
+- demo/demo2/PS_demo2.Rmd:93
+
+#### Algorithm
+
+1. **Input validation**:
+   - Takes sparse matrix of guide counts (guides × cells)
+   - Takes Seurat object for cell barcode reference
+
+2. **Matrix to triplet conversion**:
+   - For each non-zero entry in matrix:
+     - Extract cell barcode (column name)
+     - Extract guide barcode (row name)
+     - Extract count value
+
+3. **Calculate statistics**:
+   - read_count: Direct count value
+   - umi_count: Typically same as read_count for UMI data
+
+4. **Format output**:
+   - Create data frame with required columns
+   - One row per guide detected per cell
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| **guide_matrix** | Matrix | Sparse matrix of guide counts (guides × cells) |
+| **seurat_obj** | Seurat | Seurat object (for cell barcode reference) |
+
+#### Return Value
+
+**Type**: data.frame
+
+**Columns**:
+- `cell`: Cell barcode
+- `barcode`: Guide barcode identifier
+- `read_count`: Number of reads
+- `umi_count`: Number of UMIs
+
+**Note**: Still needs `sgrna` and `gene` columns to be added manually
+
+#### Usage Example
+
+```r
+# Extract guide count matrix from Seurat CRISPR assay
+guide_matrix = sobj[['CRISPR']]@counts
+
+# Convert to triplet format
+bc_frame = guidematrix_to_triplet(guide_matrix, sobj)
+
+# Add required columns
+bc_frame[,'sgrna'] = bc_frame[,'barcode']
+bc_frame[,'gene'] = sub('-[0-9]+$', '', bc_frame[,'barcode'])  # Extract gene from barcode
+
+# Now ready for scmageck_eff_estimate()
+```
+
+#### When to Use
+
+✅ **Use when**:
+- Your guide counts are in matrix format (common with 10X Feature Barcoding)
+- You have a CRISPR assay in your Seurat object
+- Need to convert from wide to long format
+
+❌ **Don't use when**:
+- You already have a barcode table file
+- Your data is already in triplet/long format
+
+---
+
+### pre_processRDS()
+
+**Purpose**: Add guide metadata to Seurat object and prepare for PS calculation
+
+**Category**: Utility / Data Preprocessing
+
+**File References**:
+- demo/demo2/PS_demo2.Rmd:111
+- datasets/HIV_Perturb-seq/hiv_perturbseq.Rmd:38
+- datasets/Pancreatic_differentiation_scRNA-seq/pancreatic_scrnaseq.Rmd:55
+
+#### Algorithm
+
+1. **Parse barcode file**:
+   - Read barcode table
+   - Extract guide assignments per cell
+
+2. **Identify singlets vs multiplets**:
+   - Count guides per cell
+   - Cells with 1 guide = singlets
+   - Cells with 2+ guides = multiplets
+
+3. **Add metadata to Seurat**:
+   - `gene`: Target gene for each cell
+   - `sgrna`: Guide sequence for each cell  
+   - `nFeature_sgRNA_guides`: Number of guides per cell
+   - Additional guide-related metrics
+
+4. **Quality metrics**:
+   - UMI counts for guides
+   - Read counts for guides
+   - Guide expression levels
+
+#### Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| **BARCODE** | data.frame or path | Barcode table or path to barcode file |
+| **RDS** | Seurat object | Seurat object to annotate |
+
+#### Return Value
+
+**Type**: Seurat object
+
+**Added metadata columns**:
+- `gene`: Target gene identity (character)
+- `sgrna`: Guide RNA identity (character)
+- `nFeature_sgRNA_guides`: Number of guides per cell (integer)
+- `umi_count_sgRNA`: Total guide UMIs (numeric)
+- Additional guide statistics
+
+#### Usage Example
+
+```r
+# From barcode file
+bc_frame = read.table("BARCODE.txt", header = T)
+sobj = pre_processRDS(bc_frame, sobj)
+
+# Check results
+table(sobj$gene)  # Distribution of guides
+table(sobj$nFeature_sgRNA_guides)  # Singlets vs multiplets
+
+# Filter for singlets
+sobj_singlet = subset(sobj, nFeature_sgRNA_guides == 1)
+```
+
+#### When to Use
+
+✅ **Use before**:
+- Calculating PS scores
+- Any guide-based analysis
+- Filtering for singlet cells
+
+✅ **Use after**:
+- Creating Seurat object
+- QC filtering
+- Normalization
+
+---
+
+### featurePlot()
+
+**Purpose**: Visualize guide distribution across cells
+
+**Category**: Visualization
+
+**File References**:
+- datasets/HIV_Perturb-seq/hiv_perturbseq.Rmd:34
+
+**Note**: This appears to be a custom function from scMAGeCK, not extensively used in the workflows. Most visualization uses Seurat's `FeaturePlot()` instead.
+
+#### Usage Example
+
+```r
+featurePlot(RDS = sobj, BARCODE = bc_frame, TYPE = "Dis")
+```
+
+---
+
